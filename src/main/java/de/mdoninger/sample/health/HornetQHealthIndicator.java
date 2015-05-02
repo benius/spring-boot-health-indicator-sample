@@ -4,43 +4,58 @@ import org.hornetq.api.core.HornetQException;
 import org.hornetq.api.core.SimpleString;
 import org.hornetq.api.core.client.ClientSession;
 import org.hornetq.api.core.client.ClientSessionFactory;
+import org.hornetq.jms.server.embedded.EmbeddedJMS;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.HealthIndicator;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+import java.util.Map;
 
 /**
  * Created by mdoninger on 30/04/15.
  */
+@Component
+@EnableConfigurationProperties(HornetQHealthConfigurationProperties.class)
 public class HornetQHealthIndicator implements HealthIndicator {
 
     private final ClientSessionFactory sf;
 
     private final String[] queueNames;
 
-    public HornetQHealthIndicator(ClientSessionFactory sf, String[] queueNames) {
+    private final HornetQHealthConfigurationProperties properties;
+
+    @Autowired
+    public HornetQHealthIndicator(ClientSessionFactory sf, EmbeddedJMS embeddedJMS, HornetQHealthConfigurationProperties properties) {
         this.sf = sf;
-        this.queueNames = queueNames;
+        this.properties = properties;
+        this.queueNames = embeddedJMS.getHornetQServer().getHornetQServerControl().getQueueNames();
     }
 
     @Override
     public Health health() {
-        long queueSize = queryQueueSizes();
         Health.Builder builder = new Health.Builder();
-        if (queueSize > 10) {
-            return builder.down().withDetail("reason", "testQueue size exceeds threshold").build();
+        builder.up();
+        for (Map.Entry<String, Integer> thresholdEntry : properties.getThresholds().entrySet()) {
+            long queueSize = queryQueueSize(thresholdEntry.getKey());
+
+            if (queueSize > thresholdEntry.getValue()) {
+                builder.down().withDetail(thresholdEntry.getKey(), thresholdEntry.getKey() + " size exceeds threshold. Current size: "
+                        + queueSize + "; threshold: " + thresholdEntry.getValue());
+            }
         }
-        return new Health.Builder().up().build();
+        return builder.build();
     }
 
-    private long queryQueueSizes() {
+    private long queryQueueSize(String queueName) {
         ClientSession coreSession = null;
         long count = 0;
         try {
-            for (String queueName : queueNames) {
-                coreSession = sf.createSession(false, false, false);
-                ClientSession.QueueQuery result;
-                result = coreSession.queueQuery(new SimpleString(queueName));
-                count = result.getMessageCount();
-            }
+            coreSession = sf.createSession(false, false, false);
+            ClientSession.QueueQuery result;
+            result = coreSession.queueQuery(new SimpleString("jms.queue." + queueName));
+            count = result.getMessageCount();
         } catch (HornetQException e) {
             e.printStackTrace();
         } finally {
